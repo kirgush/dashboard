@@ -1,0 +1,366 @@
+---
+output: 
+  flexdashboard::flex_dashboard:
+    navbar:
+      - { title: "Main page", href: "file:///O:/Risk/interactive_scorecards_dashboard/title_page.html", align: right }
+ 
+params:
+  data: a_nonpayroll_ros_1 
+ 
+title: "`r toupper(params$data)`"
+---
+ 
+ 
+```{r setup, include=FALSE}
+ 
+# libs -----------------
+library(flexdashboard)
+library(ggplot2)
+library(plotly)
+library(tidyverse)
+library(lubridate)
+library(plotROC)
+library(dygraphs)
+library(highcharter)
+library(haven)
+library(zoo)
+ 
+ 
+# paths for tables ------------------------
+models_tables_path <- c("")
+meta_data_path <- c("")
+ 
+# funtions loading
+R.utils::sourceDirectory("")
+ 
+ 
+# model's table --------------------------
+model_table <- read_sas(paste0(models_tables_path, params$data, ".sas7bdat"), NULL)
+names(model_table) <- tolower(names(model_table))
+ 
+# meta_data data -------------------------
+models <- read_delim(paste0(meta_data_path,"models.csv"), ";", 
+                     escape_double = FALSE, trim_ws = TRUE)
+ 
+vars_discr <- read_csv(paste0(meta_data_path,"vars.csv"))
+ 
+ 
+ 
+```
+ 
+ 
+ 
+Discriminative Power
+=====================================  
+ 
+Column {data-width= 50}
+-------------------------------------
+ 
+### Discriminative power dynamics
+    
+```{r out.width = 9, out.height = 5}
+# Gini and Auc calculations by year_quarter
+gini_dynamics <- model_table %>% 
+  mutate(max_dr12 = as.numeric(max_dr12)) %>%
+  filter(is.na(max_dr12) == F) %>% 
+  select(score, max_dr12, consideration_date) %>% 
+  mutate(report_date =  as.Date( as.yearqtr(consideration_date), frac = 1)) %>% 
+  group_by(report_date) %>% 
+  summarise(gini  = round(fastAUC(score, max_dr12) * 2 - 1, 2)) %>% 
+  dplyr::ungroup() %>% 
+  as.data.frame() 
+ 
+gini_dynamics_plot <- ggplot(gini_dynamics, aes(x = ymd(report_date), y = gini, group=1, na.rm=T,
+                                                text = paste('Gini:', gini ,
+                                                            '<br> Reporting date: ', as.Date(report_date)))) + 
+                        geom_rect(xmin = as.numeric(min(gini_dynamics$report_date) - 300),
+                                  xmax = as.numeric(max(gini_dynamics$report_date)) + 300, 
+                                  ymin=.0, 
+                                  ymax=.2, 
+                                  fill="#C37887", alpha=.2) +
+                        geom_rect(xmin = as.numeric(min(gini_dynamics$report_date) - 300),
+                                  xmax = as.numeric(max(gini_dynamics$report_date)) + 300, 
+                                  ymin=.2, 
+                                  ymax=.5, 
+                                  fill="#F4EB6E", alpha=.2) +
+                        geom_rect(xmin = as.numeric(min(gini_dynamics$report_date)) - 300,
+                                  xmax = as.numeric(max(gini_dynamics$report_date)) + 300, 
+                                  ymin=.5, 
+                                  ymax= 1, 
+                                  fill="#7BA363", alpha=.2) +
+                        geom_line() + 
+                        geom_point() +
+                        ylim(min(gini_dynamics$gini) - 0.1, max(gini_dynamics$gini) + 0.1) +
+                        xlim(min(gini_dynamics$report_date), max(gini_dynamics$report_date)) + 
+                        xlab("Reporting date") + 
+                        ylab("Gini coefficient") +  
+                        theme_bw()
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ggplotly(gini_dynamics_plot, tooltip = c("text"))
+ 
+ 
+ 
+```
+ 
+ 
+### Scores distribution for good and bad loans
+```{r out.width = 9, out.height = 5}
+p <- model_table %>% 
+  filter(is.na(max_dr12) == F) %>% 
+  select(score, max_dr12) %>%
+  mutate(score = round(score, 1),
+         type_of_client = factor(if_else(max_dr12 == 0, "Good", "Bad"))) %>% 
+  ggplot(.) + 
+         geom_line(aes(x = score, col = type_of_client), adjust = 3, stat="density") + 
+         labs(x = "Score", y = "Density", col = "Color") + theme_bw()
+p
+ 
+ggplotly(p, tooltip = c("score") )
+ 
+```
+ 
+ 
+ 
+ 
+Column {data-width=500 }
+-------------------------------------   
+ 
+ 
+###  Lift plot
+
+```{r}
+ 
+lift_data <- model_table %>% 
+  filter(ref_period == 0) %>% 
+  filter(is.na(max_dr12) == F) %>% 
+  arrange(score) %>% 
+  mutate(`Percent of bad` = cumsum(max_dr12)/sum(max_dr12) * 100) %>% 
+  mutate(`Percent of population` = row_number()/ n() * 100 ) %>% 
+  select(`Percent of bad`, `Percent of population`) %>% 
+  mutate_all(., funs(round(., 2)))
+ 
+ 
+lift_plot_gg <- ggplot(lift_data, aes(x = `Percent of population`, y = `Percent of bad`)) + 
+  geom_line() + 
+  xlab("Percent of population, %") + 
+  ylab("Percent of bad, %") + 
+  theme_bw() 
+  #geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1))
+
+ggplotly(lift_plot_gg)
+ 
+ 
+ 
+```
+ 
+ 
+### Kolmogorov - Smirnov
+    
+```{r out.width = 9, out.height = 5}
+ 
+ks <- model_table %>% 
+  mutate(max_dr12 = as.numeric(max_dr12)) %>% 
+  filter(is.na(max_dr12) == F) %>% 
+  select(score, max_dr12) %>%
+  mutate(def = factor(if_else(max_dr12 == 0, "Good", "Bad"))) %>% 
+  group_by(max_dr12) %>% 
+  nest() %>% 
+  mutate(data = map(data, ~ mutate(.x, cdf = cume_dist(score)))) %>% 
+  unnest() %>% 
+  sample_frac(0.3)
+ 
+ks_gg <- ggplot(data = ks) + geom_line(aes(x = score, y =cdf, col = def)) + 
+  theme_bw()
+ 
+ 
+ggplotly(ks_gg, tooltip = c("score"))
+```
+ 
+Stability {data-orientation=rows}
+=====================================     
+ 
+Row {data-height=600}
+-------------------------------------
+ 
+### Risk stability dynamics by variables
+
+```{r}
+testpsi <- model_table %>%
+    mutate(y_q = factor(quarter(consideration_date,with_year=TRUE)))
+ 
+cols.to.factor <- sapply( testpsi, function(col) length(unique(col)) < 5 )
+testpsi[ cols.to.factor] <- lapply(testpsi[ cols.to.factor] , factor)
+ 
+ref  <- testpsi %>% 
+  filter(ref_period == 1) %>% 
+  mutate(y_q = quarter(consideration_date, with_year = T))
+ 
+spisok_ref <- unique(ref$y_q)
+ 
+ 
+vars <- models %>% 
+  filter(model == params$data) %>% 
+  distinct(var_x) %>% 
+  pull() %>% 
+  tolower()
+ 
+for_risk_psi <- model_table %>% 
+  filter(quarter(consideration_date, with_year = T) <= quarter(max(model_table$consideration_date), 
+                                                               with_year = T) - 1) 
+ 
+ 
+risk_psi_table <- map(vars, risk_psi, data = for_risk_psi) %>% 
+  reduce(bind_rows) %>% 
+  mutate(risk_psi = round(risk_psi, 2)) # round for better mouse on displaying 
+
+#risk_psi_table <- risk_psi_table %>% filter(timeunit_q>max(spisok_ref))
+risk_psi_table <- risk_psi_table %>% 
+  filter(timeunit_q > max(spisok_ref))
+ 
+# risk stability chart -------------------------------
+
+plot_ly(risk_psi_table, x = factor(risk_psi_table$timeunit_q), 
+                        y = risk_psi_table$risk_psi,
+                        color = risk_psi_table$variable,
+                        type = 'scatter',
+                        mode = 'lines+markers') %>%
+  add_lines(y=0.2,color=I("Black"),name='acceptable instability') %>%
+  add_lines(y=0.1,color=I("Grey"),name='low instability') %>%
+  layout(legend = list(orientation = 'h'))
+ 
+```
+ 
+Row {data-height=600}
+-------------------------------------
+ 
+### Stability dynamics by variables
+
+```{r}
+ 
+ne_ref  <- testpsi %>% 
+  filter(ref_period == 0) %>% 
+  mutate(y_q = quarter(consideration_date, with_year = T))%>%
+  filter(y_q>max(spisok_ref))
+ 
+spisok_neref<-unique(ne_ref$y_q)
+ 
+psi_table <- data.frame(y_q= character(), vars= character(), psi = numeric(),stringsAsFactors=FALSE)
+s=0
+for (i in 1:length(vars)){
+  for (j in 1:length(spisok_neref)){
+    s <- s+1
+    a <- as.factor(ref[,vars[i]][[1]])
+    b <- as.factor(testpsi[testpsi$y_q==spisok_neref[j],vars[i]][[1]])
+    psi_table[s,3]=round(psi(a,b),digits = 3)
+    psi_table[s,2]=vars[i]
+    psi_table[s,1]=spisok_neref[j]
+  }
+}
+ 
+library(plotly)
+ 
+psi_table <- psi_table %>% arrange(vars,y_q)
+ 
+plot_ly(psi_table,x= factor(psi_table$y_q), y = psi_table$psi,color = psi_table$vars,type = 'scatter',mode = 'lines+markers') %>%
+  add_lines(y=0.2,color=I("Black"),name='acceptable instability') %>%
+  add_lines(y=0.1,color=I("Grey"),name='low instability') %>%
+  layout(legend = list(orientation = 'h'))
+ 
+```   
+ 
+ 
+Model errors 
+=====================================     
+ 
+Column {}
+-------------------------------------
+ 
+### The correctness of the calculation  
+```{r}
+# if (test_expression) {
+# statement1
+# } else {
+# statement2
+# }
+
+error_table_path <- paste0("//Rsb-assasp1/SASUSERS/DRKR/Common/common_share/scoring/dash_tables/errors_table/", 
+                           params$data, 
+                           ".sas7bdat")
+ 
+if (file.exists(error_table_path)) {
+ 
+    error_table <- read_sas(error_table_path, NULL)
+ 
+    error_table %>%
+        mutate(raznica_bin=if_else(raznica==0,"true","errors","errors")) %>%    
+        group_by(raznica_bin) %>%    
+        summarize(count = n()) %>%
+        plot_ly(labels = ~raznica_bin, values = ~count,textposition = 'outside',
+                marker = list(colors =c("rgba(207, 52, 52, 0.6)","rgba(50, 171, 96, 0.6)"))) %>%
+              add_pie(hole = 0.81) %>%
+              layout(title = paste0('The correctness of the calculation ', params$data),showlegend=T) %>%
+              add_annotations(x=0,y=-0.05,
+                          text = 'The correctness calculated as the difference 
+                                  between scores in decision making system and theoretically model',
+                          font = list(family = 'Arial', size = 15, color = 'rgb(126,150,150)'),
+                          showarrow = FALSE)
+} else {
+  print("Model is not still implemented in production enviroment!")
+}
+```
+ 
+Column {}
+-------------------------------------
+ 
+### The most common errors  
+```{r}
+ 
+# Here need to quote error table!
+if (file.exists(error_table_path)) {
+ 
+  error_table <- read_sas(error_table_path, NULL)
+ 
+  top_differences <- error_table %>%
+    filter(raznica != 0)  %>%
+    mutate(raznica = as.character(raznica)) %>%
+    group_by(raznica) %>%
+    summarize(count = n()) %>% 
+    top_n(5,count) %>% 
+    arrange(count)
+ 
+ 
+  xform <- list(categoryarray = top_differences$raznica)
+ 
+  plot_ly(top_differences,
+          x = top_differences$count,
+          y= top_differences$raznica,
+          type = 'bar', marker = list(color = 'rgba(207, 52, 52, 0.6)')) %>% 
+          layout(yaxis = xform,title ='The most common errors',xaxis=list(title='count of score'))
+ 
+} else {
+    print("Waiting for implementation.")
+  }
+ 
+```
+ 
+Variables description {data-orientation=rows}
+=====================================     
+ 
+Row {data-height=600}
+-------------------------------------
+ 
+### 
+
+```{r}
+models %>% 
+  filter(model == params$data) %>% 
+  select(Variable = var, Description) %>% 
+  distinct() %>% 
+  kableExtra::kable(.) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
